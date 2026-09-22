@@ -1,35 +1,18 @@
 import http from 'node:http'
+import path from 'node:path'
 import express from 'express'
-import cors from 'cors'
 import { Server as SocketIOServer } from 'socket.io'
 
 const PORT = Number.parseInt(process.env.PORT ?? '3001', 10)
 const TEN_MINUTES = 10 * 60 * 1000
-const configuredOrigins = (process.env.FRONTEND_ORIGIN ?? '*')
-  .split(',')
-  .map((origin) => origin.trim())
-  .filter(Boolean)
-
-const corsOptions = {
-  origin(origin, callback) {
-    if (!origin || configuredOrigins.includes('*') || configuredOrigins.includes(origin)) {
-      callback(null, true)
-      return
-    }
-    callback(new Error(`CORS origin not allowed: ${origin}`))
-  },
-}
 
 const app = express()
 const httpServer = http.createServer(app)
-const io = new SocketIOServer(httpServer, {
-  cors: corsOptions,
-})
+const io = new SocketIOServer(httpServer)
 
 const readings = []
 let nextReadingId = 1
 
-app.use(cors(corsOptions))
 app.use(express.json({ limit: '32kb' }))
 
 function getDeviceStatus() {
@@ -69,6 +52,39 @@ function parseReading(body) {
   }
 }
 
+// Demo-only seed data keeps the dashboard useful before the first ESP32 reading.
+// Remove this block for a real deployment that should start with an empty history.
+function seedDemoReadings() {
+  const demoLocation = { lat: 14.5995, lng: 120.9842 }
+  const samples = [
+    { level: 1, hoursAgo: 48, latOffset: 0.0008, lngOffset: -0.0006 },
+    { level: 0, hoursAgo: 40, latOffset: 0.0005, lngOffset: -0.0002 },
+    { level: 2, hoursAgo: 32, latOffset: 0.0002, lngOffset: 0.0003 },
+    { level: 3, hoursAgo: 26, latOffset: -0.0003, lngOffset: 0.0006 },
+    { level: 4, hoursAgo: 20, latOffset: -0.0005, lngOffset: 0.0004 },
+    { level: 3, hoursAgo: 14, latOffset: -0.0002, lngOffset: 0.0001 },
+    { level: 2, hoursAgo: 8, latOffset: 0.0001, lngOffset: -0.0003 },
+    { level: 3, hoursAgo: 4, latOffset: 0.0004, lngOffset: -0.0005 },
+    { level: 2, hoursAgo: 2, latOffset: 0.0006, lngOffset: -0.0002 },
+    { level: 3, hoursAgo: 0.08, latOffset: 0.0007, lngOffset: 0.0001 },
+  ]
+
+  for (const sample of samples) {
+    const timestamp = new Date(Date.now() - sample.hoursAgo * 60 * 60 * 1000)
+    readings.push({
+      id: `reading-${nextReadingId++}`,
+      level: sample.level,
+      lat: demoLocation.lat + sample.latOffset,
+      lng: demoLocation.lng + sample.lngOffset,
+      timestamp: timestamp.toISOString(),
+      receivedAt: timestamp.toISOString(),
+      smsSent: sample.level >= 3,
+    })
+  }
+}
+
+seedDemoReadings()
+
 app.post('/api/readings', (request, response) => {
   try {
     const reading = parseReading(request.body)
@@ -94,6 +110,21 @@ app.get('/api/device/status', (_request, response) => {
 
 app.get('/health', (_request, response) => {
   response.json({ ok: true })
+})
+
+const distDirectory = path.resolve(process.cwd(), 'dist')
+app.use(express.static(distDirectory))
+app.use((request, response, next) => {
+  if (
+    request.method === 'GET' &&
+    !request.path.startsWith('/api/') &&
+    request.path !== '/health' &&
+    !request.path.startsWith('/socket.io/')
+  ) {
+    response.sendFile(path.join(distDirectory, 'index.html'))
+    return
+  }
+  next()
 })
 
 io.on('connection', (socket) => {
